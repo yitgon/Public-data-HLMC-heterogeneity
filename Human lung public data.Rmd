@@ -1,0 +1,154 @@
+---
+title: "human lung data"
+author: "Yitao"
+date: "2023-05-05"
+output: html_document
+---
+
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(anndata)
+library(tidyverse)
+```
+
+```{r}
+rawcounts <- read_h5ad("lung_5loc_sc_sn_raw_counts_cellxgene.h5ad")
+metadata <- read.csv("lung_5loc_sc_sn_cellxgene_030222_meta.csv")
+counts_T_X <- rawcounts$T$X
+rownames(metadata)<- colnames(counts_T_X)
+#metadata <- metadata[,-1]
+so <- CreateSeuratObject(counts = counts_T_X, meta.data = metadata)
+so@meta.data
+```
+
+```{r}
+so.mc <- subset(so, Celltypes=="Mast_cell")
+so.mc@meta.data
+```
+```{r}
+so.mc[["percent.mt"]] <- PercentageFeatureSet(so.mc, pattern = "^MT-")
+quantile(so.mc@meta.data$percent.mt, seq(0,1,0.01))
+quantile(so.mc@meta.data$nCount_RNA, seq(0,1,0.05))
+quantile(so.mc@meta.data$nFeature_RNA, seq(0,1,0.05))
+so.mc <- subset(so.mc, percent.mt <= 12 & 
+                 nCount_RNA >= 600 &
+                 nCount_RNA <= 4100 &
+                 nFeature_RNA >= 300 &
+                   nFeature_RNA <= 1700)
+so.mc@meta.data
+
+so.mc[["Location"]] <- so.mc$Loc_true
+
+so.mc$Location[so.mc$Location == "d_LowLeftPar"] <- "Parenchyma"
+so.mc$Location[so.mc$Location == "b_Bronchi.2.3"] <- "Bronchi"
+so.mc$Location[so.mc$Location == "c_Bronchi.4"] <- "Bronchi"
+so.mc$Location[so.mc$Location == "a_Trachea"] <- "Bronchi"
+so.mc$Location[so.mc$Location == "e_TopLeftPar"] <- "Parenchyma"
+```
+
+```{r}
+so.mc<- FindVariableFeatures(so.mc, nfeatures = 1000)
+so.mc <- ScaleData(so.mc)
+so.mc <- NormalizeData(so.mc)
+so.mc <- RunPCA(so.mc, npcs = 100, verbose = FALSE)
+pca <- DimPlot(so.mc, reduction = "pca",group.by = "Loc_true")
+so.mc <- RunUMAP(so.mc, reduction = "pca", 
+              #dims = 1:25, 
+            dims = 1:20,
+              verbose = TRUE, 
+              seed.use = 42,
+              n.neighbors = 50, min.dist = 0.6)
+umap <- DimPlot(so.mc, reduction = "umap",group.by = "Location")
+umap
+
+so.mc.sc <- subset(so.mc, Material=="cells")
+so.mc.sn <- subset(so.mc, Material!="cells")
+
+DimPlot(so.mc.sc, reduction = "umap",group.by = "Study")
+DimPlot(so.mc.sn, reduction = "umap",group.by = "Loc_true")
+
+```
+
+```{r}
+library(harmony)
+so.mc.har.sc <- RunHarmony(so.mc.sc, group.by.vars = "Study")
+#so.mc.har.sn <- RunHarmony(so.mc.sn, group.by.vars = "Donor")
+so.mc.har <- RunHarmony(so.mc, group.by.vars = "Version")
+
+
+so.mc.har.sc <- RunUMAP(so.mc.har.sc, reduction = "harmony", 
+              #dims = 1:25, 
+            dims = 1:20,
+              verbose = TRUE, 
+              seed.use = 42,
+              n.neighbors = 50, min.dist = 0.3)
+so.mc.har.sn <- RunUMAP(so.mc.har.sn, reduction = "pca", 
+              #dims = 1:25, 
+            dims = 1:25,
+              verbose = TRUE, 
+              seed.use = 42,
+              n.neighbors = 40, min.dist = 0.6)
+so.mc.har <- RunUMAP(so.mc.har, reduction = "harmony", 
+              #dims = 1:25, 
+            dims = 1:25,
+              verbose = TRUE, 
+              seed.use = 42,
+              n.neighbors = 40, min.dist = 0.6)
+DimPlot(so.mc.har.sc,  reduction = "umap", group.by = "Location", pt.size = .3)
+DimPlot(so.mc.har.sn,  reduction = "umap", group.by = "Loc_true", pt.size = .5)
+DimPlot(so.mc.har,  reduction = "umap", group.by = "Loc_true", pt.size = .5)
+
+```
+
+
+```{r}
+so.mc.har.sc <-so.mc.har.sc %>% 
+ FindNeighbors(reduction = "pca"
+                  #,  dims = 1:25
+                  ,dims=1:25
+                  ) %>% 
+    FindClusters(resolution = 0.7
+                 , #algorithm = 4
+                 ) %>% 
+    identity()
+```
+```{r}
+DimPlot(so.mc.har.sc,  reduction = "umap", group.by = "seurat_clusters", pt.size = .3)
+```
+
+```{r}
+ggplot(so.mc.har.sc@meta.data) +
+  geom_bar(aes(x= seurat_clusters, fill=Location),position = "fill")
+```
+```{r}
+Idents(so.mc.har.sc) <- "seurat_clusters"
+
+so.markers.sc <- FindAllMarkers(so.mc.har.sc, 
+                             only.pos = TRUE, 
+                             min.pct = 0.1, 
+                             logfc.threshold = 0.3)
+as.tibble(so.markers.sc)
+```
+
+```{r}
+Idents(so.mc.har.sc) <- "seurat_clusters"
+
+
+so.markers.sc%>%
+    group_by(cluster) %>%
+    top_n(n = 5, wt = avg_log2FC) -> top10.de
+
+#mso.markers.merge.2 %>%
+    #group_by(cluster) %>%
+    #top_n(n = 10, wt = avg_log2FC) -> top10.de.merge.2
+
+p.so.heatmap <- DoHeatmap(so.mc.har.sc, features = top10.de$gene)
+p.so.heatmap 
+```
+```{r}
+p2 <-FeaturePlot(so.mc.har.sc, "EGR1")
+p2
+```
+
